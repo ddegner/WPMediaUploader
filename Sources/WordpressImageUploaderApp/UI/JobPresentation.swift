@@ -18,6 +18,8 @@ enum FileRowStatus: Equatable, Sendable {
     case imported
     case regenerating
     case regenerated
+    case sideloading
+    case sideloaded
     case failed
 
     var label: String {
@@ -32,6 +34,8 @@ enum FileRowStatus: Equatable, Sendable {
         case .imported: return "imported"
         case .regenerating: return "regenerating"
         case .regenerated: return "regenerated"
+        case .sideloading: return "sideloading"
+        case .sideloaded: return "sideloaded"
         case .failed: return "failed"
         }
     }
@@ -40,9 +44,10 @@ enum FileRowStatus: Equatable, Sendable {
         switch self {
         case .failed:
             return .failure
-        case .regenerated:
+        case .regenerated, .sideloaded:
             return .success
-        case .preflight, .uploading, .uploaded, .verifying, .verified, .importing, .imported, .regenerating:
+        case .preflight, .uploading, .uploaded, .verifying, .verified, .importing, .imported, .regenerating,
+             .sideloading:
             return .progress
         case .queued:
             return .secondary
@@ -73,6 +78,8 @@ enum FileRowStatus: Equatable, Sendable {
                 return .importing
             case .regenerating:
                 return .regenerating
+            case .sideloading:
+                return .sideloading
             default:
                 break
             }
@@ -89,6 +96,8 @@ enum FileRowStatus: Equatable, Sendable {
             return .imported
         case .regenerated:
             return .regenerated
+        case .sideloaded:
+            return .sideloaded
         case .failed:
             return .failed
         }
@@ -131,6 +140,17 @@ enum FileRowPresentation {
                 return "Imported as attachment ID \(attachmentId) and regenerated"
             }
             return "Imported and regenerated"
+        case .sideloaded:
+            let base: String
+            if let attachmentId = item.importAttachmentId {
+                base = "Imported as attachment ID \(attachmentId)"
+            } else {
+                base = "Imported"
+            }
+            if let avifCount = item.avifCount, avifCount > 0 {
+                return "\(base), \(avifCount) AVIF file(s) sideloaded"
+            }
+            return "\(base), AVIF sideload skipped (not a JPEG)"
         case .queued:
             return "Waiting to upload"
         }
@@ -153,10 +173,6 @@ struct JobPresentation: Sendable {
     let successfulFiles: Int
     let failedFiles: Int
     let remainingFiles: Int
-    let queuedFiles: Int
-    let uploadedFiles: Int
-    let verifiedFiles: Int
-    let importedFiles: Int
 
     let statusLine: String
     let progressLabel: String
@@ -164,9 +180,16 @@ struct JobPresentation: Sendable {
     let rateLine: String
     let overallProgress: Double
 
+    /// The terminal success status for a job: sideload-enabled jobs finish
+    /// files at .sideloaded, others at .regenerated.
+    static func successStatus(for job: Job) -> FileItemStatus {
+        job.avifSideloadOn ? .sideloaded : .regenerated
+    }
+
     static func processedFileCount(in job: Job) -> Int {
-        job.localFiles.count { item in
-            item.status == .regenerated || item.status == .failed
+        let success = successStatus(for: job)
+        return job.localFiles.count { item in
+            item.status == success || item.status == .failed
         }
     }
 
@@ -184,13 +207,10 @@ struct JobPresentation: Sendable {
     ) -> JobPresentation {
         let totalFiles = job.localFiles.count
         let processedFiles = processedFileCount(in: job)
-        let successfulFiles = job.localFiles.count { $0.status == .regenerated }
+        let successStatus = successStatus(for: job)
+        let successfulFiles = job.localFiles.count { $0.status == successStatus }
         let failedFiles = job.failedCount
         let remainingFiles = max(totalFiles - processedFiles, 0)
-        let queuedFiles = countFiles(in: job, status: .queued)
-        let uploadedFiles = countFiles(in: job, status: .uploaded)
-        let verifiedFiles = countFiles(in: job, status: .verified)
-        let importedFiles = countFiles(in: job, status: .imported)
 
         let runtimeEstimate = estimateRuntime(
             for: job,
@@ -223,10 +243,6 @@ struct JobPresentation: Sendable {
             successfulFiles: successfulFiles,
             failedFiles: failedFiles,
             remainingFiles: remainingFiles,
-            queuedFiles: queuedFiles,
-            uploadedFiles: uploadedFiles,
-            verifiedFiles: verifiedFiles,
-            importedFiles: importedFiles,
             statusLine: statusLine(for: job, processedFiles: processedFiles, activeFileStatus: activeFileStatus),
             progressLabel: totalFiles > 0 ? "\(processedFiles)/\(totalFiles) processed" : "0/0 processed",
             etaLine: etaLine,
@@ -239,16 +255,16 @@ struct JobPresentation: Sendable {
         let total = job.localFiles.count
         guard total > 0 else { return 0 }
 
-        // Weight each file's contribution by how far through the 4-step
-        // pipeline it has progressed (upload → verify → import → regenerate).
+        // Weight each file's contribution by how far through the pipeline it
+        // has progressed (upload → verify → import → regenerate [→ sideload]).
         // This produces a smoothly advancing bar instead of one that only
         // jumps when a file fully completes.
-        let stepsPerFile = 4.0
+        let stepsPerFile = job.avifSideloadOn ? 5.0 : 4.0
         let totalSteps = Double(total) * stepsPerFile
 
         var completedSteps = 0.0
         for file in job.localFiles {
-            completedSteps += stepWeight(for: file.status)
+            completedSteps += stepWeight(for: file.status, stepsPerFile: stepsPerFile)
         }
 
         // During an active rsync upload, blend in the per-file transfer
@@ -259,7 +275,7 @@ struct JobPresentation: Sendable {
            activeFile.status == .queued
         {
             let alreadyUploaded = Double(job.localFiles.count {
-                [.uploaded, .verified, .imported, .regenerated, .failed].contains($0.status)
+                [.uploaded, .verified, .imported, .regenerated, .sideloaded, .failed].contains($0.status)
             })
             let rsyncFraction = max(0, min(1, job.uploadProgress * Double(total) - alreadyUploaded))
             completedSteps += rsyncFraction
@@ -268,19 +284,16 @@ struct JobPresentation: Sendable {
         return min(completedSteps / totalSteps, 1.0)
     }
 
-    private static func stepWeight(for status: FileItemStatus) -> Double {
+    private static func stepWeight(for status: FileItemStatus, stepsPerFile: Double) -> Double {
         switch status {
         case .queued:       return 0
         case .uploaded:     return 1
         case .verified:     return 2
         case .imported:     return 3
         case .regenerated:  return 4
-        case .failed:       return 4
+        case .sideloaded:   return 5
+        case .failed:       return stepsPerFile
         }
-    }
-
-    private static func countFiles(in job: Job, status: FileItemStatus) -> Int {
-        job.localFiles.count { $0.status == status }
     }
 
     private static func statusLine(for job: Job, processedFiles: Int, activeFileStatus: FileRowStatus?) -> String {
@@ -304,7 +317,9 @@ struct JobPresentation: Sendable {
         }
 
         if let nextIndex = job.localFiles.firstIndex(where: { file in
-            file.status == .queued || file.status == .uploaded || file.status == .verified || file.status == .imported
+            file.status == .queued || file.status == .uploaded || file.status == .verified
+                || file.status == .imported
+                || (job.avifSideloadOn && file.status == .regenerated)
         }) {
             return "Next file \(nextIndex + 1) of \(total): \(job.localFiles[nextIndex].filename)"
         }

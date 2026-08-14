@@ -12,7 +12,10 @@ final class JobStore {
     var jobs: [Job] = []
     var lastError: String?
 
-    init() {
+    private let jobsFileURL: URL
+
+    init(jobsFileURL: URL = AppPaths.jobsFile) {
+        self.jobsFileURL = jobsFileURL
         load()
     }
 
@@ -41,11 +44,21 @@ final class JobStore {
         }
     }
 
-    func clear() {
-        let logPaths = jobs.map(\.logsPath)
-        jobs.removeAll()
+    /// Removes stored jobs and their log files. Pass a profile id to clear
+    /// only that profile's history; nil clears everything.
+    func clear(profileId: UUID? = nil) {
+        let removed: [Job]
+        if let profileId {
+            removed = jobs.filter { $0.profileId == profileId }
+            jobs.removeAll { $0.profileId == profileId }
+        } else {
+            removed = jobs
+            jobs.removeAll()
+        }
+
+        guard !removed.isEmpty else { return }
         if save() {
-            cleanupLogFiles(atPaths: logPaths)
+            cleanupLogFiles(atPaths: removed.map(\.logsPath))
         }
     }
 
@@ -60,8 +73,9 @@ final class JobStore {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
 
         do {
+            AppPaths.ensureDirectory(jobsFileURL.deletingLastPathComponent())
             let data = try encoder.encode(jobs)
-            try data.write(to: AppPaths.jobsFile, options: [.atomic])
+            try data.write(to: jobsFileURL, options: [.atomic])
             lastError = nil
             return true
         } catch {
@@ -72,7 +86,7 @@ final class JobStore {
     }
 
     private func load() {
-        let fileURL = AppPaths.jobsFile
+        let fileURL = jobsFileURL
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
             jobs = []
             return

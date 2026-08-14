@@ -101,6 +101,32 @@ struct KeychainService {
         return secret
     }
 
+    /// Deletes every stranded askpass-* secret. Askpass items live only for
+    /// the duration of one ssh invocation and are removed by
+    /// SSHAuthContext.cleanup(); a crash or force-quit strands them with
+    /// random account names nothing can look up, so the app sweeps at launch.
+    static func deleteStrandedAskPassSecrets() {
+        for currentService in [serviceName, legacyServiceName] {
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: currentService,
+                kSecReturnAttributes as String: true,
+                kSecMatchLimit as String: kSecMatchLimitAll
+            ]
+
+            var result: CFTypeRef?
+            let status = SecItemCopyMatching(query as CFDictionary, &result)
+            guard status == errSecSuccess, let items = result as? [[String: Any]] else { continue }
+
+            for item in items {
+                guard let account = item[kSecAttrAccount as String] as? String,
+                      account.hasPrefix("askpass-")
+                else { continue }
+                try? deleteSecret(account: account)
+            }
+        }
+    }
+
     static func deleteSecret(account: String) throws {
         var firstFailure: OSStatus?
         for currentService in [serviceName, legacyServiceName] {

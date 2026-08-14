@@ -11,6 +11,10 @@ struct ProfileEditorView: View {
     @State private var keyPassphrase: String
     @State private var showKeyImporter = false
     @State private var saveError: String?
+    // Recomputed on edits instead of per render pass: validation resolves a
+    // security-scoped bookmark for SSH-key profiles, which is too expensive
+    // to run twice for every keystroke's body evaluation.
+    @State private var validationError: String?
 
     @State private var isTesting = false
     @State private var testLines: [String] = []
@@ -28,6 +32,11 @@ struct ProfileEditorView: View {
         _profile = State(initialValue: profile)
         _password = State(initialValue: initialPassword ?? "")
         _keyPassphrase = State(initialValue: initialKeyPassphrase ?? "")
+        _validationError = State(initialValue: ProfileValidation.firstError(
+            for: profile,
+            password: initialPassword ?? "",
+            context: .editor
+        ))
     }
 
     var body: some View {
@@ -62,12 +71,24 @@ struct ProfileEditorView: View {
             allowedContentTypes: [.data],
             allowsMultipleSelection: false
         ) { result in
-            guard case let .success(urls) = result, let url = urls.first else {
-                return
+            switch result {
+            case let .success(urls):
+                guard let url = urls.first else { return }
+                profile.keyPath = url.path
+                do {
+                    profile.keyBookmarkData = try SecurityScopedFileAccess.bookmarkData(for: url)
+                } catch {
+                    // Without a bookmark the sandbox will refuse the key at
+                    // upload time — say so now, next to the file that failed.
+                    profile.keyBookmarkData = nil
+                    saveError = "Could not create a sandbox bookmark for the key file: \(error.localizedDescription)"
+                }
+            case let .failure(error):
+                saveError = error.localizedDescription
             }
-            profile.keyPath = url.path
-            profile.keyBookmarkData = try? SecurityScopedFileAccess.bookmarkData(for: url)
         }
+        .onChange(of: profile) { revalidate() }
+        .onChange(of: password) { revalidate() }
         .frame(width: 720, height: 760)
         .alert("Save Error", isPresented: Binding(
             get: { saveError != nil },
@@ -105,7 +126,7 @@ struct ProfileEditorView: View {
                     TextField("Optional", text: Binding(
                         get: { profile.keyPath ?? "" },
                         set: {
-                            profile.keyPath = trimmed($0).isEmpty ? nil : $0
+                            profile.keyPath = $0.trimmed.isEmpty ? nil : $0
                             profile.keyBookmarkData = nil
                         }
                     ))
@@ -139,6 +160,19 @@ struct ProfileEditorView: View {
                 .font(.body.monospaced())
 
             Toggle("Keep remote files after success", isOn: $profile.keepRemoteFiles)
+
+            Toggle(
+                "Generate AVIFs locally",
+                isOn: Binding(
+                    get: { profile.generateAvifsLocally ?? false },
+                    set: { profile.generateAvifsLocally = $0 }
+                )
+            )
+            Text(
+                "Encodes AVIF versions of each JPEG on this Mac and uploads them next to the WordPress derivatives. Server-side AVIF conversion is skipped during import; LQIP placeholders are still generated."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
         }
     }
 
@@ -170,11 +204,22 @@ struct ProfileEditorView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
+
+            // The reason Save is disabled, instead of a mute dead button.
+            if let validationError {
+                Text(validationError)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
     private var canSave: Bool {
-        ProfileValidation.canSave(profile: profile, password: password)
+        validationError == nil
+    }
+
+    private func revalidate() {
+        validationError = ProfileValidation.firstError(for: profile, password: password, context: .editor)
     }
 
     private func saveAndClose() {
@@ -202,20 +247,15 @@ struct ProfileEditorView: View {
         testSuccess = false
 
         Task {
+            // This Task inherits the view's main-actor isolation; no hop needed.
             let result = await jobRunner.testConnection(
                 profile: profile,
                 password: password.isEmpty ? nil : password,
                 keyPassphrase: keyPassphrase.isEmpty ? nil : keyPassphrase
             )
-            await MainActor.run {
-                testLines = result.checks
-                testSuccess = result.success
-                isTesting = false
-            }
+            testLines = result.checks
+            testSuccess = result.success
+            isTesting = false
         }
-    }
-
-    private func trimmed(_ value: String) -> String {
-        value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

@@ -1,0 +1,37 @@
+name: Tests
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: macos-26
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_26*.app | sort -V | tail -n1)"
+          swift --version
+
+      - name: Run tests
+        shell: bash
+        run: swift test
+
+      - name: SwiftLint
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v swiftlint >/dev/null 2>&1; then
+            brew install swiftlint
+          fi
+          swiftlint

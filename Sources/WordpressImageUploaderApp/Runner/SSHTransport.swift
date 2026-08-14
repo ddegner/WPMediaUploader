@@ -3,14 +3,10 @@ import Foundation
 struct SSHAuthContext: Sendable {
     var additionalSSHArgs: [String]
     var environment: [String: String]?
-    var askPassScriptURL: URL?
     var securityScopedAccesses: [SecurityScopedFileAccess] = []
     var temporaryAskPassAccount: String?
 
     func cleanup() {
-        if let askPassScriptURL {
-            try? FileManager.default.removeItem(at: askPassScriptURL)
-        }
         for access in securityScopedAccesses {
             access.stop()
         }
@@ -27,31 +23,13 @@ struct ProfileTestResult: Sendable {
 
 @MainActor
 final class SSHTransport {
-    private let commandRunner = CommandRunner()
+    private let commandRunner: any CommandExecuting
     private let profileStore: ProfileStore
     private var knownHostsPathCache: String?
 
-    init(profileStore: ProfileStore) {
+    init(profileStore: ProfileStore, commandRunner: any CommandExecuting = CommandRunner()) {
         self.profileStore = profileStore
-    }
-
-    // MARK: - Stale askpass cleanup (B1)
-
-    private func cleanupStaleAskPassScripts() {
-        let fm = FileManager.default
-        for directory in askPassDirectories() {
-            guard let contents = try? fm.contentsOfDirectory(atPath: directory.path) else { continue }
-
-            for filename in contents where filename.hasPrefix("askpass-") && filename.hasSuffix(".sh") {
-                let fullPath = directory.appendingPathComponent(filename, isDirectory: false).path
-                try? fm.removeItem(atPath: fullPath)
-            }
-        }
-    }
-
-    private func cleanupStaleAskPassScriptsIfNeeded() {
-        // Always clean up stale scripts - small performance cost for better reliability
-        cleanupStaleAskPassScripts()
+        self.commandRunner = commandRunner
     }
 
     // MARK: - Auth context
@@ -82,8 +60,6 @@ final class SSHTransport {
         keyPassphrase: String?,
         passwordMissingDetail: String
     ) throws -> SSHAuthContext {
-        cleanupStaleAskPassScriptsIfNeeded()
-
         switch profile.authType {
         case .sshKey:
             var args: [String] = []
@@ -107,7 +83,6 @@ final class SSHTransport {
                 return SSHAuthContext(
                     additionalSSHArgs: args,
                     environment: askPass.environment,
-                    askPassScriptURL: nil,
                     securityScopedAccesses: [access].compactMap { $0 },
                     temporaryAskPassAccount: askPass.keychainAccount
                 )
@@ -117,7 +92,6 @@ final class SSHTransport {
             return SSHAuthContext(
                 additionalSSHArgs: args,
                 environment: nil,
-                askPassScriptURL: nil,
                 securityScopedAccesses: [access].compactMap { $0 },
                 temporaryAskPassAccount: nil
             )
@@ -138,7 +112,6 @@ final class SSHTransport {
             return SSHAuthContext(
                 additionalSSHArgs: args,
                 environment: askPass.environment,
-                askPassScriptURL: nil,
                 temporaryAskPassAccount: askPass.keychainAccount
             )
         }
@@ -151,7 +124,7 @@ final class SSHTransport {
         auth: SSHAuthContext,
         remoteCommand: String,
         writer: LogWriter?,
-        onLine: (@Sendable (CommandOutputStream, String) -> Void)? = nil
+        onLine: (@MainActor @Sendable (CommandOutputStream, String) -> Void)? = nil
     ) async throws -> CommandResult {
         // Wrap in a login shell so the server's full PATH (including versioned PHP) is available.
         let loginCommand = "bash -lc \(shellSingleQuote(remoteCommand))"
@@ -184,8 +157,9 @@ final class SSHTransport {
         localFileURL: URL,
         localFileBookmarkData: Data? = nil,
         remoteTargetPath: String,
+        transferMode: RsyncTransferMode,
         writer: LogWriter?,
-        onLine: (@Sendable (CommandOutputStream, String) -> Void)? = nil
+        onLine: (@MainActor @Sendable (CommandOutputStream, String) -> Void)? = nil
     ) async throws {
         let fileAccess = try SecurityScopedFileAccess.start(
             url: localFileURL,
@@ -194,10 +168,55 @@ final class SSHTransport {
         )
         defer { fileAccess.stop() }
 
+        try await runRsyncWithRetry(
+            profile: profile,
+            auth: auth,
+            localPaths: [fileAccess.url.path],
+            remoteTargetPath: remoteTargetPath,
+            transferMode: transferMode,
+            writer: writer,
+            onLine: onLine
+        )
+    }
+
+    /// Uploads several local files to one remote directory in a single rsync
+    /// invocation. Sources must be app-container files (no security scope).
+    func runRsyncFiles(
+        profile: ServerProfile,
+        auth: SSHAuthContext,
+        localFileURLs: [URL],
+        remoteTargetPath: String,
+        transferMode: RsyncTransferMode,
+        writer: LogWriter?,
+        onLine: (@MainActor @Sendable (CommandOutputStream, String) -> Void)? = nil
+    ) async throws {
+        guard !localFileURLs.isEmpty else { return }
+
+        try await runRsyncWithRetry(
+            profile: profile,
+            auth: auth,
+            localPaths: localFileURLs.map(\.path),
+            remoteTargetPath: remoteTargetPath,
+            transferMode: transferMode,
+            writer: writer,
+            onLine: onLine
+        )
+    }
+
+    private func runRsyncWithRetry(
+        profile: ServerProfile,
+        auth: SSHAuthContext,
+        localPaths: [String],
+        remoteTargetPath: String,
+        transferMode: RsyncTransferMode,
+        writer: LogWriter?,
+        onLine: (@MainActor @Sendable (CommandOutputStream, String) -> Void)? = nil
+    ) async throws {
         do {
-            try await attemptRsyncFile(
+            try await attemptRsync(
                 profile: profile, auth: auth,
-                localFileURL: fileAccess.url, remoteTargetPath: remoteTargetPath,
+                localPaths: localPaths, remoteTargetPath: remoteTargetPath,
+                transferMode: transferMode,
                 writer: writer, onLine: onLine
             )
         } catch let error as CommandRunnerError {
@@ -210,67 +229,43 @@ final class SSHTransport {
             writer?.append("Transient rsync error (exit \(code)), retrying in 2 seconds…")
             try await Task.sleep(for: .seconds(2))
 
-            try await attemptRsyncFile(
+            try await attemptRsync(
                 profile: profile, auth: auth,
-                localFileURL: fileAccess.url, remoteTargetPath: remoteTargetPath,
+                localPaths: localPaths, remoteTargetPath: remoteTargetPath,
+                transferMode: transferMode,
                 writer: writer, onLine: onLine
             )
         }
     }
 
-    private func attemptRsyncFile(
+    private func attemptRsync(
         profile: ServerProfile,
         auth: SSHAuthContext,
-        localFileURL: URL,
+        localPaths: [String],
         remoteTargetPath: String,
+        transferMode: RsyncTransferMode,
         writer: LogWriter?,
-        onLine: (@Sendable (CommandOutputStream, String) -> Void)? = nil
+        onLine: (@MainActor @Sendable (CommandOutputStream, String) -> Void)? = nil
     ) async throws {
-        var arguments = makeRsyncArguments(
+        let arguments = makeRsyncArguments(
             profile: profile,
             auth: auth,
-            localFileURL: localFileURL,
+            localPaths: localPaths,
             remoteTargetPath: remoteTargetPath,
-            progressMode: .preferred
+            transferMode: transferMode
         )
 
-        let firstAttempt = try await runRsync(
+        let result = try await runRsync(
             arguments: arguments,
             environment: auth.environment,
             writer: writer,
             onLine: onLine
         )
 
-        if firstAttempt.exitCode == 0 {
-            return
+        guard result.exitCode == 0 else {
+            let stderrTail = result.stderrLines.suffix(3).joined(separator: " | ")
+            throw CommandRunnerError.nonZeroExit(code: result.exitCode, stderrTail: stderrTail)
         }
-
-        if shouldFallbackForRsyncCompatibility(firstAttempt.stderrLines) {
-            writer?.append("rsync compatibility fallback: retrying with --append --progress")
-            arguments = makeRsyncArguments(
-                profile: profile,
-                auth: auth,
-                localFileURL: localFileURL,
-                remoteTargetPath: remoteTargetPath,
-                progressMode: .compatible
-            )
-
-            let secondAttempt = try await runRsync(
-                arguments: arguments,
-                environment: auth.environment,
-                writer: writer,
-                onLine: onLine
-            )
-
-            guard secondAttempt.exitCode == 0 else {
-                let stderrTail = secondAttempt.stderrLines.suffix(3).joined(separator: " | ")
-                throw CommandRunnerError.nonZeroExit(code: secondAttempt.exitCode, stderrTail: stderrTail)
-            }
-            return
-        }
-
-        let stderrTail = firstAttempt.stderrLines.suffix(3).joined(separator: " | ")
-        throw CommandRunnerError.nonZeroExit(code: firstAttempt.exitCode, stderrTail: stderrTail)
     }
 
     private func isTransientRsyncExitCode(_ code: Int32) -> Bool {
@@ -287,7 +282,7 @@ final class SSHTransport {
         profile: ServerProfile,
         auth: SSHAuthContext,
         writer: LogWriter?,
-        onLine: (@Sendable (CommandOutputStream, String) -> Void)? = nil
+        onLine: (@MainActor @Sendable (CommandOutputStream, String) -> Void)? = nil
     ) async throws -> String {
         let result = try await runSSH(
             profile: profile,
@@ -308,7 +303,7 @@ final class SSHTransport {
         auth: SSHAuthContext,
         remotePath: String,
         writer: LogWriter?,
-        onLine: (@Sendable (CommandOutputStream, String) -> Void)? = nil
+        onLine: (@MainActor @Sendable (CommandOutputStream, String) -> Void)? = nil
     ) async throws -> Int64 {
         let command = "(stat -c%s \(shellSingleQuote(remotePath)) 2>/dev/null || stat -f%z \(shellSingleQuote(remotePath)) 2>/dev/null)"
         let result = try await runSSH(
@@ -330,13 +325,57 @@ final class SSHTransport {
         return value
     }
 
+    /// Fetches the sizes of several remote files in one ssh round trip.
+    /// Returns one entry per requested path, in order; nil means the file
+    /// is missing or its size could not be read.
+    func fetchRemoteFileSizes(
+        profile: ServerProfile,
+        auth: SSHAuthContext,
+        remotePaths: [String],
+        writer: LogWriter?,
+        onLine: (@MainActor @Sendable (CommandOutputStream, String) -> Void)? = nil
+    ) async throws -> [Int64?] {
+        guard !remotePaths.isEmpty else { return [] }
+
+        // One line of output per path; "missing" keeps the line count stable
+        // when a file is absent so positions still align with remotePaths.
+        let command = remotePaths
+            .map { path in
+                let quoted = shellSingleQuote(path)
+                return "(stat -c%s \(quoted) 2>/dev/null || stat -f%z \(quoted) 2>/dev/null || echo missing)"
+            }
+            .joined(separator: "; ")
+
+        let result = try await runSSH(
+            profile: profile,
+            auth: auth,
+            remoteCommand: command,
+            writer: writer,
+            onLine: onLine
+        )
+
+        // Login-shell noise (motd, profile output) can precede the stat lines.
+        let lines = result.stdoutLines
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .suffix(remotePaths.count)
+
+        guard lines.count == remotePaths.count else {
+            throw JobRunnerError.profileIncomplete(
+                "Could not read remote file sizes (expected \(remotePaths.count) results, got \(lines.count))"
+            )
+        }
+
+        return lines.map { Int64($0) }
+    }
+
     // MARK: - Shared preflight checks (S6)
 
     func runPreflightChecks(
         profile: ServerProfile,
         auth: SSHAuthContext,
         writer: LogWriter?,
-        onLine: (@Sendable (CommandOutputStream, String) -> Void)? = nil
+        onLine: (@MainActor @Sendable (CommandOutputStream, String) -> Void)? = nil
     ) async throws {
         _ = try await runSSH(
             profile: profile,
@@ -374,7 +413,10 @@ final class SSHTransport {
 
     // MARK: - Private helpers
 
-    func sshBaseArgs(profile: ServerProfile, auth: SSHAuthContext) -> [String] {
+    /// One builder for the connection options shared by ssh and rsync's -e
+    /// transport — an option added to one path but not the other would mean
+    /// the two connect with different security settings.
+    private func sharedSSHOptions(profile: ServerProfile, auth: SSHAuthContext) -> [String] {
         var args = [
             "-p", "\(profile.port)",
             "-o", "StrictHostKeyChecking=accept-new",
@@ -385,48 +427,54 @@ final class SSHTransport {
             args += ["-o", "UserKnownHostsFile=\(knownHostsPath)"]
         }
         args += auth.additionalSSHArgs
-        args.append("\(profile.username)@\(profile.host)")
         return args
     }
 
+    func sshBaseArgs(profile: ServerProfile, auth: SSHAuthContext) -> [String] {
+        sharedSSHOptions(profile: profile, auth: auth) + ["\(profile.username)@\(profile.host)"]
+    }
+
     private func rsyncSSHTransport(profile: ServerProfile, auth: SSHAuthContext) -> String {
-        var parts = [
-            "ssh",
-            "-p", "\(profile.port)",
-            "-o", "StrictHostKeyChecking=accept-new",
-            "-o", "ConnectTimeout=10",
-            "-o", "ConnectionAttempts=1"
-        ]
-        if let knownHostsPath = knownHostsPath() {
-            parts += ["-o", "UserKnownHostsFile=\(knownHostsPath)"]
-        }
-        parts += auth.additionalSSHArgs
-        return parts.map(shellSingleQuote).joined(separator: " ")
+        // Note: this string is split by rsync's own tokenizer, not a shell.
+        // openrsync handles plain quotes but not escaped ones, so paths
+        // containing an apostrophe cannot be represented reliably here.
+        (["ssh"] + sharedSSHOptions(profile: profile, auth: auth))
+            .map(shellSingleQuote)
+            .joined(separator: " ")
     }
 
-    private enum RsyncProgressMode {
-        case preferred
-        case compatible
+    enum RsyncTransferMode: Sendable {
+        /// Staging uploads into a fresh per-job directory: keep a partial file
+        /// from an interrupted attempt so the retry resumes via delta transfer.
+        /// Never uses --append — a mismatched prefix must be repaired, and the
+        /// delta algorithm's checksums do that where append would corrupt.
+        case resume
+        /// Pushes into live directories (e.g. the WordPress uploads tree):
+        /// whole-file replace through rsync's temp-file-and-rename default,
+        /// leaving no partial files behind on failure.
+        case overwrite
     }
 
-    private func makeRsyncArguments(
+    // Internal for tests (source ordering / remote-target-last invariants).
+    func makeRsyncArguments(
         profile: ServerProfile,
         auth: SSHAuthContext,
-        localFileURL: URL,
+        localPaths: [String],
         remoteTargetPath: String,
-        progressMode: RsyncProgressMode
+        transferMode: RsyncTransferMode
     ) -> [String] {
-        var arguments = ["-az", "--partial"]
+        var arguments = ["-az"]
 
-        switch progressMode {
-        case .preferred:
-            arguments += ["--append-verify", "--info=progress2"]
-        case .compatible:
-            arguments += ["--append", "--progress"]
+        switch transferMode {
+        case .resume:
+            arguments.append("--partial")
+        case .overwrite:
+            break
         }
+        arguments.append("--progress")
 
         arguments += ["-e", rsyncSSHTransport(profile: profile, auth: auth)]
-        arguments.append(localFileURL.path)
+        arguments += localPaths
         arguments.append("\(profile.username)@\(profile.host):\(shellSingleQuote(remoteTargetPath))")
         return arguments
     }
@@ -435,7 +483,7 @@ final class SSHTransport {
         arguments: [String],
         environment: [String: String]?,
         writer: LogWriter?,
-        onLine: (@Sendable (CommandOutputStream, String) -> Void)?
+        onLine: (@MainActor @Sendable (CommandOutputStream, String) -> Void)?
     ) async throws -> CommandResult {
         writer?.append("$ /usr/bin/rsync \(arguments.joined(separator: " "))")
 
@@ -447,13 +495,6 @@ final class SSHTransport {
             displayName: "rsync"
         )
         return try await commandRunner.run(spec, onLine: onLine)
-    }
-
-    private func shouldFallbackForRsyncCompatibility(_ stderrLines: [String]) -> Bool {
-        let stderr = stderrLines.joined(separator: "\n").lowercased()
-        let unknownOption = stderr.contains("unrecognized option") || stderr.contains("unknown option")
-        guard unknownOption else { return false }
-        return stderr.contains("append-verify") || stderr.contains("info=progress2")
     }
 
     // Use the app binary itself as SSH_ASKPASS. The sandbox blocks exec of dynamically-
@@ -472,19 +513,6 @@ final class SSHTransport {
             "WP_ASKPASS_MODE": "1",
             "WP_ASKPASS_KEYCHAIN_ACCOUNT": account
         ], account)
-    }
-
-    private func askPassDirectories() -> [URL] {
-        [
-            AppPaths.appSupportDirectory,
-            askPassDirectory()
-        ]
-    }
-
-    private func askPassDirectory() -> URL {
-        FileManager.default.temporaryDirectory
-            .appendingPathComponent("WPMediaUploader", isDirectory: true)
-            .appendingPathComponent("askpass", isDirectory: true)
     }
 
     private func knownHostsPath() -> String? {

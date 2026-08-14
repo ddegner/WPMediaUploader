@@ -216,7 +216,11 @@ struct WordpressMediaUploaderApp: App {
                 Button("Delete Selected Files") {
                     focusedWindowCommandActions?.deleteSelectedFiles()
                 }
-                .keyboardShortcut(.delete, modifiers: [])
+                // ⌘⌫, not bare Delete: a menu key equivalent is consulted
+                // before first-responder key handling, so bare Delete would
+                // steal Backspace from every text field. The file list
+                // itself already handles plain Delete via .onDeleteCommand.
+                .keyboardShortcut(.delete, modifiers: [.command])
                 .disabled(!(focusedWindowCommandActions?.canDeleteSelectedFiles ?? false))
 
                 Divider()
@@ -259,7 +263,7 @@ struct WordpressMediaUploaderApp: App {
                 Divider()
                 Toggle("Show Sidebar", isOn: focusedShowProfilesDrawerToggleBinding)
                     .disabled(focusedShowProfilesDrawer == nil)
-                    .keyboardShortcut("s", modifiers: [.command, .option])
+                    .keyboardShortcut("s", modifiers: [.command, .control])
 
                 Toggle("Show Inspector", isOn: focusedShowOperationsDrawerToggleBinding)
                     .disabled(focusedShowOperationsDrawer == nil)

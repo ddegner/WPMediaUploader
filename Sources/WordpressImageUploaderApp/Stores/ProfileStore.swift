@@ -82,14 +82,16 @@ final class ProfileStore {
         keyPassphrase: String
     ) throws -> ServerProfile {
         let previousProfile = profiles.first(where: { $0.id == profile.id })
-        let previousPassword = previousProfile.flatMap(loadPassword(for:))
-        let previousKeyPassphrase = previousProfile.flatMap(loadKeyPassphrase(for:))
+        // Best-effort snapshot: a failed read here only weakens the rollback
+        // path below, it never decides whether a secret gets deleted.
+        let previousPassword = previousProfile.flatMap { (try? loadPassword(for: $0)) ?? nil }
+        let previousKeyPassphrase = previousProfile.flatMap { (try? loadKeyPassphrase(for: $0)) ?? nil }
 
         var storedProfile = profile
         do {
             if profile.authType == .password {
                 storedProfile = try clearingKeyPassphrase(for: storedProfile)
-                if trimmed(password).isEmpty {
+                if password.trimmed.isEmpty {
                     storedProfile = try clearingPassword(for: storedProfile)
                 } else {
                     storedProfile = try storingPassword(password, for: storedProfile)
@@ -124,11 +126,20 @@ final class ProfileStore {
     func deleteProfile(id: UUID) {
         guard let profile = profiles.first(where: { $0.id == id }) else { return }
 
-        if let passwordAccount = profile.passwordKeychainId {
-            try? secretStore.deleteSecret(account: passwordAccount)
-        }
-        if let keyPassphraseAccount = profile.keyPassphraseKeychainId {
-            try? secretStore.deleteSecret(account: keyPassphraseAccount)
+        // The delete confirmation promises the stored credentials are removed.
+        // If the Keychain refuses, keep the profile so the user can retry
+        // instead of silently leaving orphaned secrets behind.
+        do {
+            if let passwordAccount = profile.passwordKeychainId {
+                try secretStore.deleteSecret(account: passwordAccount)
+            }
+            if let keyPassphraseAccount = profile.keyPassphraseKeychainId {
+                try secretStore.deleteSecret(account: keyPassphraseAccount)
+            }
+        } catch {
+            lastError = "Could not remove stored credentials for \(profile.name): \(error.localizedDescription)"
+            logger.error("Failed to delete profile secrets: \(error.localizedDescription, privacy: .public)")
+            return
         }
 
         do {
@@ -174,14 +185,31 @@ final class ProfileStore {
         return updated
     }
 
-    func loadPassword(for profile: ServerProfile) -> String? {
+    /// Returns nil when no secret is stored; throws when the Keychain read
+    /// itself fails. Callers must not treat a thrown error as "no password" —
+    /// that is how a transient Keychain failure turns into a wiped credential.
+    func loadPassword(for profile: ServerProfile) throws -> String? {
         guard let account = profile.passwordKeychainId else { return nil }
-        return try? secretStore.getSecret(account: account)
+        return try secretStore.getSecret(account: account)
     }
 
-    func loadKeyPassphrase(for profile: ServerProfile) -> String? {
+    func loadKeyPassphrase(for profile: ServerProfile) throws -> String? {
         guard let account = profile.keyPassphraseKeychainId else { return nil }
-        return try? secretStore.getSecret(account: account)
+        return try secretStore.getSecret(account: account)
+    }
+
+    /// Loads both stored secrets for the profile editor. Returns nil (and
+    /// records lastError) when the Keychain read fails, so the editor never
+    /// opens with an empty password field that a plain Save would then
+    /// persist as "delete the stored secret".
+    func loadSecretsForEditing(profile: ServerProfile) -> (password: String?, keyPassphrase: String?)? {
+        do {
+            return (try loadPassword(for: profile), try loadKeyPassphrase(for: profile))
+        } catch {
+            lastError = "Could not read stored credentials for \(profile.name): \(error.localizedDescription)"
+            logger.error("Failed to load secrets for editing: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
     }
 
     private func persistProfiles(_ profiles: [ServerProfile]) throws {
@@ -253,9 +281,5 @@ final class ProfileStore {
     private func handlePersistenceError(_ error: Error) {
         lastError = "Failed to save profiles: \(error.localizedDescription)"
         logger.error("Failed to save profiles: \(error.localizedDescription, privacy: .public)")
-    }
-
-    private func trimmed(_ value: String) -> String {
-        value.trimmed
     }
 }

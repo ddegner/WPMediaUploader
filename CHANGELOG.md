@@ -4,6 +4,27 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [1.1] - 2026-08-05
+
+### Added
+- Local AVIF generation ("Generate AVIFs locally" per-profile toggle): after each JPEG imports, the app encodes AVIF versions of the original and every WordPress-generated thumbnail size on the Mac, then sideloads them into the site's uploads directory next to the JPEGs.
+- Embedded `avifenc` helper (static libavif + aom) so AVIF encoding honors quality, speed, chroma subsampling, and bit-depth settings; falls back to the system ImageIO encoder when the helper is unavailable.
+- Integration with the AVIF Local Support WordPress plugin: the app reads the plugin's encoder settings (`aviflosu_*` options) so locally encoded AVIFs match server-side settings, runs imports with `--skip-plugins=avif-local-support` to prevent double encoding, and triggers LQIP placeholder generation after sideloading.
+- Size verification for every sideloaded AVIF and a new `sideloading` pipeline stage with per-file status, retry, and interruption recovery.
+- Resume-friendly uploads: interrupted rsync transfers keep partial files and resume via delta transfer; pushes into live uploads directories use whole-file replace.
+- Automatic retry for transient rsync failures (protocol/timeout/SSH connection errors).
+- Batched remote file-size checks (one SSH round trip for all AVIF derivatives).
+- CI test workflow (`.github/workflows/test.yml`) running `swift test` on pushes.
+- Orchestration test suite driving the full upload pipeline against a scripted command executor, plus unit tests for AVIF plugin-settings parsing.
+
+### Changed
+- macOS 26 (Tahoe) look and feel: Liquid Glass chrome, first-class file rows, undo for queue edits, continuous log selection, and drawer state fixes.
+- Minimum deployment target raised to macOS 26.
+- App termination is guarded while an upload is running; quitting now waits for ssh/rsync child processes to be torn down.
+- SSH askpass secrets now pass through the Keychain instead of environment variables.
+- Remote job-directory cleanup refuses paths that don't match the expected per-job UUID shape.
+- `JobRunner` pipeline refactored: shared per-stage runner (guard → step transition → cancellation-aware failure capture → progress recalculation) with per-stage workers, and AVIF preflight split into testable units.
+
 ## [1.0.1] - 2026-03-13
 
 ### Added

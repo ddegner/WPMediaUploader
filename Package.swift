@@ -16,7 +16,12 @@ let package = Package(
         .executableTarget(
             name: "WordpressMediaUploaderApp",
             path: "Sources/WordpressImageUploaderApp",
-            exclude: ["Assets.xcassets", "Info.plist", "WPMediaUploader.entitlements"]
+            exclude: [
+                "Assets.xcassets",
+                "Info.plist",
+                "WPMediaUploader.entitlements",
+                "AvifencHelper.entitlements"
+            ]
         ),
         .testTarget(
             name: "WordpressMediaUploaderAppTests",

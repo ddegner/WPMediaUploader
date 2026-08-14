@@ -26,3 +26,7 @@ __pycache__/
 
 .claude/
 test.jpg
+
+# Vendored avifenc is built from pinned source by scripts/build-avifenc.sh
+# (which also writes the checksum); neither belongs in git history.
+Vendor/

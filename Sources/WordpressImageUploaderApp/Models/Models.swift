@@ -31,6 +31,12 @@ struct ServerProfile: Identifiable, Codable, Equatable, Sendable {
     var remoteStagingRoot: String
     var keepRemoteFiles: Bool
     var profileColorHex: String?
+    // Optional so profiles saved by older app versions still decode.
+    var generateAvifsLocally: Bool?
+
+    var generateAvifsLocallyEnabled: Bool {
+        generateAvifsLocally ?? false
+    }
 
     static let `default` = ServerProfile(
         id: UUID(),
@@ -46,7 +52,8 @@ struct ServerProfile: Identifiable, Codable, Equatable, Sendable {
         wpRootPath: "",
         remoteStagingRoot: "~/wp-media-import",
         keepRemoteFiles: false,
-        profileColorHex: nil
+        profileColorHex: nil,
+        generateAvifsLocally: nil
     )
 }
 
@@ -73,6 +80,7 @@ enum FileItemStatus: String, Codable, CaseIterable, Sendable, Comparable {
     case verified
     case imported
     case regenerated
+    case sideloaded
     case failed
 
     private var sortOrder: Int {
@@ -82,7 +90,8 @@ enum FileItemStatus: String, Codable, CaseIterable, Sendable, Comparable {
         case .verified: return 2
         case .imported: return 3
         case .regenerated: return 4
-        case .failed: return 5
+        case .sideloaded: return 5
+        case .failed: return 6
         }
     }
 
@@ -101,6 +110,9 @@ struct FileItem: Identifiable, Codable, Equatable, Sendable {
     var remotePath: String?
     var importAttachmentId: Int?
     var errorMessage: String?
+    // Number of AVIF derivatives sideloaded for this file (0 = stage skipped).
+    // Optional so jobs saved by older app versions still decode.
+    var avifCount: Int?
 
     init(localURL: URL, bookmarkData: Data? = nil, filename: String, sizeBytes: Int64) {
         self.id = UUID()
@@ -118,6 +130,7 @@ enum JobStep: String, Codable, Sendable {
     case verifying
     case importing
     case regenerating
+    case sideloading
     case finished
     case failed
     case cancelled
@@ -129,7 +142,8 @@ extension JobStep {
         .uploading,
         .verifying,
         .importing,
-        .regenerating
+        .regenerating,
+        .sideloading
     ]
 
     var isTerminal: Bool {
@@ -172,6 +186,14 @@ struct Job: Identifiable, Codable, Sendable {
     var logsPath: String
 
     var importedIds: [Int]
+
+    // Snapshot of the profile's "Generate AVIFs locally" setting at job start.
+    // Optional so jobs saved by older app versions still decode.
+    var avifSideloadEnabled: Bool?
+
+    var avifSideloadOn: Bool {
+        avifSideloadEnabled ?? false
+    }
 
     init(profileId: UUID, remoteJobDir: String, files: [FileItem], logsPath: String) {
         self.id = UUID()

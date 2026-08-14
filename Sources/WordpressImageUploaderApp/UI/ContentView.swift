@@ -186,13 +186,11 @@ struct ContentView: View {
     @State private var isDropTargeted = false
     @State private var selectedFileRowIDs: Set<String> = []
     @State private var profileEditorDraft: ProfileEditorDraft?
-    @State private var showBlockingErrorAlert = false
-    @State private var showProfileStoreErrorAlert = false
-    @State private var showJobStoreErrorAlert = false
     @State private var selectedProfileId: UUID?
     @State private var runtimeAnchors: [UUID: JobRuntimeAnchor] = [:]
     @State private var splitViewVisibility = WorkspaceLayoutState.initialSplitVisibility()
-    @State private var rightPane = WorkspaceLayoutState.initialOperationsPane()
+    @State private var isOperationsPaneVisible = WorkspaceLayoutState.initialOperationsDrawerVisible()
+    @State private var operationsTab = WorkspaceLayoutState.initialOperationsTab()
     @State private var profilePendingDeletion: ServerProfile?
     @State private var showResetConfirmation = false
     @State private var showClearHistoryConfirmation = false
@@ -215,11 +213,11 @@ struct ContentView: View {
     }
 
     private var isOperationsDrawerVisible: Bool {
-        rightPane != nil
+        isOperationsPaneVisible
     }
 
     private var activeOperationsTab: WorkspaceOperationsTab {
-        rightPane ?? .activeJob
+        operationsTab
     }
 
     private var profilesDrawerSceneBinding: Binding<Bool> {
@@ -270,26 +268,57 @@ struct ContentView: View {
             }
     }
 
+    // Derived bindings instead of shadow @State Bools: the alert presence
+    // follows the store's error directly, so errors set before this view
+    // subscribes (e.g. a corrupt profiles file at launch) still surface.
+    private func errorAlertBinding(
+        get value: @escaping () -> String?,
+        clear: @escaping () -> Void
+    ) -> Binding<Bool> {
+        Binding(
+            get: { value() != nil },
+            set: { if !$0 { clear() } }
+        )
+    }
+
     private var workspaceAlertLayer: some View {
         workspaceConfirmationLayer
-            .alert("Error", isPresented: $showBlockingErrorAlert, presenting: jobRunner.blockingError) { _ in
+            .alert(
+                "Error",
+                isPresented: errorAlertBinding(
+                    get: { jobRunner.blockingError },
+                    clear: { jobRunner.blockingError = nil }
+                ),
+                presenting: jobRunner.blockingError
+            ) { _ in
                 Button("OK") { jobRunner.blockingError = nil }
             } message: { error in
                 Text(error)
             }
-            .alert("Profile Storage Error", isPresented: $showProfileStoreErrorAlert, presenting: profileStore.lastError) { _ in
+            .alert(
+                "Profile Storage Error",
+                isPresented: errorAlertBinding(
+                    get: { profileStore.lastError },
+                    clear: { profileStore.lastError = nil }
+                ),
+                presenting: profileStore.lastError
+            ) { _ in
                 Button("OK") { profileStore.lastError = nil }
             } message: { error in
                 Text(error)
             }
-            .alert("Job History Error", isPresented: $showJobStoreErrorAlert, presenting: jobStore.lastError) { _ in
+            .alert(
+                "Job History Error",
+                isPresented: errorAlertBinding(
+                    get: { jobStore.lastError },
+                    clear: { jobStore.lastError = nil }
+                ),
+                presenting: jobStore.lastError
+            ) { _ in
                 Button("OK") { jobStore.lastError = nil }
             } message: { error in
                 Text(error)
             }
-            .onChange(of: jobRunner.blockingError) { _, val in showBlockingErrorAlert = val != nil }
-            .onChange(of: profileStore.lastError) { _, val in showProfileStoreErrorAlert = val != nil }
-            .onChange(of: jobStore.lastError) { _, val in showJobStoreErrorAlert = val != nil }
     }
 
     private var workspaceConfirmationLayer: some View {
@@ -318,10 +347,14 @@ struct ContentView: View {
             }
             .confirmationDialog("Clear Job History", isPresented: $showClearHistoryConfirmation) {
                 Button("Clear History", role: .destructive) {
-                    jobRunner.clearJobHistory()
+                    jobRunner.clearJobHistory(profileId: selectedProfileId)
                 }
             } message: {
-                Text("This will remove all completed job records.")
+                Text(
+                    selectedProfileId == nil
+                        ? "This will remove all completed job records."
+                        : "This will remove the selected profile's completed job records."
+                )
             }
     }
 
@@ -352,9 +385,8 @@ struct ContentView: View {
             .onChange(of: splitViewVisibility) { _, newValue in
                 // The window toolbar's native sidebar toggle writes the
                 // binding directly, so persist here to cover every path.
-                UserDefaults.standard.set(
-                    WorkspaceLayoutState.profilesDrawerVisible(for: newValue),
-                    forKey: WorkspaceLayoutState.showProfilesDrawerKey
+                WorkspaceLayoutState.persistProfilesDrawer(
+                    visible: WorkspaceLayoutState.profilesDrawerVisible(for: newValue)
                 )
             }
             .onChange(of: externalFileIntake.sequence) { _, _ in
@@ -469,6 +501,7 @@ struct ContentView: View {
                         Image(systemName: "plus")
                     }
                     .help("New profile")
+                    .accessibilityLabel("New profile")
 
                     Button {
                         if let selectedProfile {
@@ -478,6 +511,7 @@ struct ContentView: View {
                         Image(systemName: "minus")
                     }
                     .help("Delete selected profile")
+                    .accessibilityLabel("Delete selected profile")
                     .disabled(!canDeleteProfile)
                 }
                 .controlSize(.small)
@@ -561,7 +595,7 @@ struct ContentView: View {
             .help("Choose files to queue for upload")
             .accessibilityLabel("Add files")
 
-            Button {
+            Button(role: .destructive) {
                 showResetConfirmation = true
             } label: {
                 Label("Reset", systemImage: "trash")
@@ -605,7 +639,9 @@ struct ContentView: View {
             .disabled(!canStartAction)
             .help("Upload selected photos and import to WordPress")
             .accessibilityLabel("Upload selected photos and import to WordPress")
-            .keyboardShortcut(.defaultAction)
+            // No bare-Return default action: in a non-modal window, Return
+            // with the file list focused must not kick off a network upload.
+            // ⌘↩ in the File menu remains the shortcut.
         }
 
         ToolbarItemGroup(placement: .primaryAction) {
@@ -794,7 +830,7 @@ struct ContentView: View {
                                 .font(.callout)
                             HStack(spacing: 4) {
                                 statusDot(for: job.step)
-                                Text(stepTitle(job.step))
+                                Text(job.step.displayTitle)
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                 Text("• \(job.localFiles.count) files")
@@ -1038,8 +1074,9 @@ struct ContentView: View {
             perItemIndicator(for: file, rowStatus: rowStatus, in: job)
             Text(rowStatus.label.uppercased())
                 .font(.caption2.monospaced())
-                .foregroundStyle(rowStatusColor(rowStatus))
+                .foregroundStyle(rowStatus.tone.color)
                 .frame(width: 108, alignment: .trailing)
+                .accessibilityLabel("Status: \(rowStatus.label)")
         }
         .padding(.vertical, 2)
         .help(
@@ -1058,11 +1095,11 @@ struct ContentView: View {
             switch rowStatus {
             case .failed:
                 Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
-            case .regenerated:
+            case .regenerated, .sideloaded:
                 Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
             case .preflight:
                 ProgressView().controlSize(.small)
-            case .uploading, .verifying, .importing, .regenerating:
+            case .uploading, .verifying, .importing, .regenerating, .sideloading:
                 if isActivelyRunning(file, in: job) {
                     ProgressView().controlSize(.small)
                 } else {
@@ -1102,29 +1139,28 @@ struct ContentView: View {
         )
     }
 
-    private func rowStatusColor(_ status: FileRowStatus) -> Color {
-        switch status.tone {
-        case .failure: .red
-        case .success: .green
-        case .progress: .blue
-        case .secondary: .secondary
+    private func jobStatusForm(job: Job) -> some View {
+        // TimelineView drives the clock so ETA/rate keep advancing during a
+        // long single-file upload instead of freezing until unrelated state
+        // happens to invalidate the view.
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            jobStatusFormContent(job: job, now: context.date)
         }
     }
 
-
-    private func jobStatusForm(job: Job) -> some View {
+    private func jobStatusFormContent(job: Job, now: Date) -> some View {
         let presentation = JobPresentation.make(
             for: job,
             activeFileStatus: activeFileStatus(for: job),
-            now: Date(),
+            now: now,
             anchor: runtimeAnchors[job.id]
         )
 
         return Form {
             Section {
                 HStack {
-                    Label(stepTitle(job.step), systemImage: stepIcon(job.step))
-                        .foregroundStyle(stepColor(job.step))
+                    Label(job.step.displayTitle, systemImage: job.step.displayIcon)
+                        .foregroundStyle(job.step.displayColor)
                     Spacer()
                     if jobRunner.isRunning {
                         ProgressView()
@@ -1200,20 +1236,20 @@ struct ContentView: View {
         let target = WorkspaceLayoutState.splitVisibility(forProfilesDrawer: isVisible)
         guard splitViewVisibility != target else { return }
         splitViewVisibility = target
-        UserDefaults.standard.set(isVisible, forKey: WorkspaceLayoutState.showProfilesDrawerKey)
+        WorkspaceLayoutState.persistProfilesDrawer(visible: isVisible)
     }
 
     private func setOperationsDrawerVisible(_ isVisible: Bool) {
-        let targetPane: WorkspaceOperationsTab? = isVisible ? activeOperationsTab : nil
-        guard rightPane != targetPane else { return }
-        rightPane = targetPane
-        UserDefaults.standard.set(isVisible, forKey: WorkspaceLayoutState.showOperationsDrawerKey)
+        guard isOperationsPaneVisible != isVisible else { return }
+        isOperationsPaneVisible = isVisible
+        WorkspaceLayoutState.persistOperationsDrawer(visible: isVisible)
     }
 
     private func selectOperationsPane(_ tab: WorkspaceOperationsTab) {
-        rightPane = tab
-        UserDefaults.standard.set(tab.rawValue, forKey: WorkspaceLayoutState.operationsTabKey)
-        UserDefaults.standard.set(true, forKey: WorkspaceLayoutState.showOperationsDrawerKey)
+        operationsTab = tab
+        isOperationsPaneVisible = true
+        WorkspaceLayoutState.persistOperationsTab(tab)
+        WorkspaceLayoutState.persistOperationsDrawer(visible: true)
     }
 
 
@@ -1229,7 +1265,7 @@ struct ContentView: View {
     private var canClearJobHistory: Bool {
         WorkspaceCommandState.canClearJobHistory(
             isRunning: jobRunner.isRunning,
-            jobCount: jobStore.jobs.count
+            jobCount: selectedProfileJobs.count
         )
     }
 
@@ -1255,20 +1291,19 @@ struct ContentView: View {
         profileStore.update(updated)
     }
 
-    private func clearJobHistory() {
-        jobRunner.clearJobHistory()
-    }
-
     private func profile(forSelection ids: Set<UUID>) -> ServerProfile? {
         guard let id = ids.first else { return nil }
         return profileStore.profiles.first { $0.id == id }
     }
 
     private func presentProfileEditor(for profile: ServerProfile) {
+        // A failed Keychain read must not open the editor with empty secret
+        // fields — saving those would delete the stored credentials.
+        guard let secrets = profileStore.loadSecretsForEditing(profile: profile) else { return }
         profileEditorDraft = ProfileEditorDraft(
             profile: profile,
-            initialPassword: profileStore.loadPassword(for: profile),
-            initialKeyPassphrase: profileStore.loadKeyPassphrase(for: profile)
+            initialPassword: secrets.password,
+            initialKeyPassphrase: secrets.keyPassphrase
         )
     }
 
@@ -1279,10 +1314,11 @@ struct ContentView: View {
         panel.canChooseDirectories = true
         panel.canChooseFiles = true
         panel.allowedContentTypes = {
-            let extensions = ["jpg", "jpeg", "jpe", "gif", "png", "bmp", "ico", "webp", "avif", "heic", "pdf"]
+            // Derived from the same list JobRunner filters with, so the
+            // picker and the pipeline can never drift apart.
             var seen = Set<String>()
             var types: [UTType] = []
-            for ext in extensions {
+            for ext in supportedImageExtensions.sorted() {
                 guard let type = UTType(filenameExtension: ext) else { continue }
                 if seen.insert(type.identifier).inserted {
                     types.append(type)
@@ -1298,7 +1334,14 @@ struct ContentView: View {
 
     private func addFiles(_ urls: [URL]) {
         let imageFiles = resolveImageFileURLs(from: urls)
-        guard !imageFiles.isEmpty else { return }
+        guard !imageFiles.isEmpty else {
+            // A drop that yields nothing must not look like a broken drop
+            // target — say why nothing happened.
+            if !urls.isEmpty {
+                jobRunner.presentNotice("No supported image files were found in the added items.")
+            }
+            return
+        }
 
         var items = fileQueue.items
         var existing = Set(items.map { $0.localURL.standardizedFileURL.path })
@@ -1326,7 +1369,7 @@ struct ContentView: View {
         guard !jobRunner.isRunning else { return }
         fileQueue.setItems([], actionName: "Reset Queue", undoManager: undoManager)
         selectedFileRowIDs.removeAll()
-        jobRunner.currentJob = nil
+        jobRunner.reset()
     }
 
     private func startQueuedUpload() {
@@ -1473,50 +1516,16 @@ struct ContentView: View {
         }
     }
 
-    private func statusColor(_ status: FileItemStatus) -> Color {
-        switch status {
-        case .failed: .red
-        case .regenerated: .green
-        case .imported, .verified, .uploaded: .blue
-        case .queued: .secondary
-        }
-    }
-
     private func statusDot(for status: FileItemStatus) -> some View {
         Circle()
-            .fill(statusColor(status))
+            .fill(status.displayColor)
             .frame(width: 8, height: 8)
     }
 
     private func statusDot(for step: JobStep) -> some View {
         Circle()
-            .fill(stepColor(step))
+            .fill(step.displayColor)
             .frame(width: 8, height: 8)
-    }
-
-    private func stepColor(_ step: JobStep) -> Color {
-        switch step {
-        case .finished: .green
-        case .failed, .cancelled: .red
-        default: .accentColor
-        }
-    }
-
-    private func stepIcon(_ step: JobStep) -> String {
-        switch step {
-        case .preflight: "network"
-        case .uploading: "arrow.up.circle"
-        case .verifying: "checkmark.shield"
-        case .importing: "square.and.arrow.down"
-        case .regenerating: "arrow.triangle.2.circlepath"
-        case .finished: "checkmark.circle.fill"
-        case .failed: "exclamationmark.triangle.fill"
-        case .cancelled: "xmark.circle"
-        }
-    }
-
-    private func stepTitle(_ step: JobStep) -> String {
-        step.rawValue.capitalized
     }
 
     private func seedRuntimeAnchorForActiveJob(force: Bool = false) {

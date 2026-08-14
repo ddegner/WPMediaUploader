@@ -47,9 +47,7 @@ final class JobRunnerLogicTests: XCTestCase {
 
     @MainActor
     func testPrepareFileItemsEmptyThrows() throws {
-        let profileStore = ProfileStore()
-        let jobStore = JobStore()
-        let runner = JobRunner(profileStore: profileStore, jobStore: jobStore)
+        let runner = TestSupport.makeRunner()
 
         XCTAssertThrowsError(try runner.prepareFileItems(urls: [])) { error in
             XCTAssertTrue(error is JobRunnerError)
@@ -58,9 +56,7 @@ final class JobRunnerLogicTests: XCTestCase {
 
     @MainActor
     func testPrepareFileItemsUnsupportedThrows() throws {
-        let profileStore = ProfileStore()
-        let jobStore = JobStore()
-        let runner = JobRunner(profileStore: profileStore, jobStore: jobStore)
+        let runner = TestSupport.makeRunner()
 
         let urls = [URL(fileURLWithPath: "/tmp/test.zip")]
         XCTAssertThrowsError(try runner.prepareFileItems(urls: urls)) { error in
@@ -85,9 +81,7 @@ final class JobRunnerLogicTests: XCTestCase {
 
         defer { try? fm.removeItem(at: tempRoot) }
 
-        let profileStore = ProfileStore()
-        let jobStore = JobStore()
-        let runner = JobRunner(profileStore: profileStore, jobStore: jobStore)
+        let runner = TestSupport.makeRunner()
 
         let items = try runner.prepareFileItems(urls: [aFile, bFile])
         XCTAssertEqual(items.count, 2)
@@ -104,9 +98,7 @@ final class JobRunnerLogicTests: XCTestCase {
         try Data([0x00, 0x01]).write(to: fileURL)
         defer { try? fm.removeItem(at: tempRoot) }
 
-        let profileStore = ProfileStore()
-        let jobStore = JobStore()
-        let runner = JobRunner(profileStore: profileStore, jobStore: jobStore)
+        let runner = TestSupport.makeRunner()
 
         let items = try runner.prepareFileItems(urls: [fileURL, fileURL])
         XCTAssertEqual(items.count, 1)
@@ -124,9 +116,7 @@ final class JobRunnerLogicTests: XCTestCase {
         try Data([0x00, 0x01]).write(to: fileURL)
         defer { try? fm.removeItem(at: tempRoot) }
 
-        let profileStore = ProfileStore()
-        let jobStore = JobStore()
-        let runner = JobRunner(profileStore: profileStore, jobStore: jobStore)
+        let runner = TestSupport.makeRunner()
 
         let items = try runner.prepareFileItems(urls: [fileURL])
         XCTAssertEqual(items.count, 1)
@@ -137,9 +127,7 @@ final class JobRunnerLogicTests: XCTestCase {
 
     @MainActor
     func testConnectionWhileRunIsActiveReturnsEarlyFailure() async {
-        let profileStore = ProfileStore()
-        let jobStore = JobStore()
-        let runner = JobRunner(profileStore: profileStore, jobStore: jobStore)
+        let runner = TestSupport.makeRunner()
         runner.isRunning = true
 
         let result = await runner.testConnection(
@@ -156,9 +144,7 @@ final class JobRunnerLogicTests: XCTestCase {
 
     @MainActor
     func testValidateProfileMissingHostThrows() {
-        let profileStore = ProfileStore()
-        let jobStore = JobStore()
-        let runner = JobRunner(profileStore: profileStore, jobStore: jobStore)
+        let runner = TestSupport.makeRunner()
 
         var profile = ServerProfile.default
         profile.host = ""
@@ -174,9 +160,7 @@ final class JobRunnerLogicTests: XCTestCase {
 
     @MainActor
     func testValidateProfileMissingUsernameThrows() {
-        let profileStore = ProfileStore()
-        let jobStore = JobStore()
-        let runner = JobRunner(profileStore: profileStore, jobStore: jobStore)
+        let runner = TestSupport.makeRunner()
 
         var profile = ServerProfile.default
         profile.host = "example.com"
@@ -192,9 +176,7 @@ final class JobRunnerLogicTests: XCTestCase {
 
     @MainActor
     func testValidateProfileMissingWpPathThrows() {
-        let profileStore = ProfileStore()
-        let jobStore = JobStore()
-        let runner = JobRunner(profileStore: profileStore, jobStore: jobStore)
+        let runner = TestSupport.makeRunner()
 
         var profile = ServerProfile.default
         profile.host = "example.com"
@@ -210,9 +192,7 @@ final class JobRunnerLogicTests: XCTestCase {
 
     @MainActor
     func testValidateProfileInvalidPortThrows() {
-        let profileStore = ProfileStore()
-        let jobStore = JobStore()
-        let runner = JobRunner(profileStore: profileStore, jobStore: jobStore)
+        let runner = TestSupport.makeRunner()
 
         var profile = ServerProfile.default
         profile.host = "example.com"
@@ -229,9 +209,7 @@ final class JobRunnerLogicTests: XCTestCase {
 
     @MainActor
     func testValidateProfileValidSSHKeyProfile() {
-        let profileStore = ProfileStore()
-        let jobStore = JobStore()
-        let runner = JobRunner(profileStore: profileStore, jobStore: jobStore)
+        let runner = TestSupport.makeRunner()
 
         var profile = ServerProfile.default
         profile.host = "example.com"
@@ -246,9 +224,7 @@ final class JobRunnerLogicTests: XCTestCase {
 
     @MainActor
     func testValidateProfilePasswordAuthIgnoresMissingSSHKeyPath() {
-        let profileStore = ProfileStore()
-        let jobStore = JobStore()
-        let runner = JobRunner(profileStore: profileStore, jobStore: jobStore)
+        let runner = TestSupport.makeRunner()
 
         var profile = ServerProfile.default
         profile.host = "example.com"
@@ -265,9 +241,7 @@ final class JobRunnerLogicTests: XCTestCase {
 
     @MainActor
     func testCanRetryFailedIsTrueForCancelledJobWithUnfinishedFiles() {
-        let profileStore = ProfileStore()
-        let jobStore = JobStore()
-        let runner = JobRunner(profileStore: profileStore, jobStore: jobStore)
+        let runner = TestSupport.makeRunner()
 
         var file = FileItem(localURL: URL(fileURLWithPath: "/tmp/a.jpg"), filename: "a.jpg", sizeBytes: 10)
         file.status = .verified
@@ -286,9 +260,7 @@ final class JobRunnerLogicTests: XCTestCase {
 
     @MainActor
     func testCanRetryFailedIsTrueForFailedJobWithQueuedFiles() {
-        let profileStore = ProfileStore()
-        let jobStore = JobStore()
-        let runner = JobRunner(profileStore: profileStore, jobStore: jobStore)
+        let runner = TestSupport.makeRunner()
 
         var file = FileItem(localURL: URL(fileURLWithPath: "/tmp/a.jpg"), filename: "a.jpg", sizeBytes: 10)
         file.status = .queued
@@ -307,9 +279,7 @@ final class JobRunnerLogicTests: XCTestCase {
 
     @MainActor
     func testCanRetryFailedIsFalseForCancelledJobWithAllFilesCompleted() {
-        let profileStore = ProfileStore()
-        let jobStore = JobStore()
-        let runner = JobRunner(profileStore: profileStore, jobStore: jobStore)
+        let runner = TestSupport.makeRunner()
 
         var file = FileItem(localURL: URL(fileURLWithPath: "/tmp/a.jpg"), filename: "a.jpg", sizeBytes: 10)
         file.status = .regenerated
@@ -328,9 +298,7 @@ final class JobRunnerLogicTests: XCTestCase {
 
     @MainActor
     func testStartWithInvalidInputClearsInlineStatusAndSetsBlockingError() {
-        let profileStore = ProfileStore()
-        let jobStore = JobStore()
-        let runner = JobRunner(profileStore: profileStore, jobStore: jobStore)
+        let runner = TestSupport.makeRunner()
 
         runner.inlineStatusMessage = "Old inline message"
         runner.start(profile: ServerProfile.default, fileURLs: [])
@@ -341,9 +309,7 @@ final class JobRunnerLogicTests: XCTestCase {
 
     @MainActor
     func testLoadJobWhileRunningKeepsCurrentJobAndSetsInlineMessage() {
-        let profileStore = ProfileStore()
-        let jobStore = JobStore()
-        let runner = JobRunner(profileStore: profileStore, jobStore: jobStore)
+        let runner = TestSupport.makeRunner()
 
         let current = Job(
             profileId: UUID(),
@@ -372,7 +338,7 @@ final class JobRunnerLogicTests: XCTestCase {
     func testJobStepInFlightStepsMatchesExpectedPipelineStages() {
         XCTAssertEqual(
             JobStep.inFlightSteps,
-            Set([.preflight, .uploading, .verifying, .importing, .regenerating])
+            Set([.preflight, .uploading, .verifying, .importing, .regenerating, .sideloading])
         )
     }
 

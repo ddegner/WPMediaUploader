@@ -50,6 +50,22 @@ enum AppPaths {
         return dir
     }
 
+    /// Root scratch directory for locally encoded AVIF derivatives.
+    /// Swept at app launch; per-file subdirectories are removed after upload.
+    static var avifWorkRootDirectory: URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent(appFolderName, isDirectory: true)
+            .appendingPathComponent("avif", isDirectory: true)
+    }
+
+    static func avifWorkDirectory(jobID: UUID, fileID: UUID) -> URL {
+        let dir = avifWorkRootDirectory
+            .appendingPathComponent(jobID.uuidString, isDirectory: true)
+            .appendingPathComponent(fileID.uuidString, isDirectory: true)
+        ensureDirectory(dir)
+        return dir
+    }
+
     @discardableResult
     static func ensureDirectory(_ url: URL) -> URL {
         if !FileManager.default.fileExists(atPath: url.path) {

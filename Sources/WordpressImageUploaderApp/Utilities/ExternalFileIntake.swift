@@ -43,10 +43,10 @@ final class DockFileOpenDelegate: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return .terminateCancel }
 
-        // Cancel, then wait (bounded) for the transport to tear down its
-        // ssh/rsync children so quitting doesn't orphan them.
-        runner.cancel()
+        // Cancel and await the transport teardown, then wait (bounded) for
+        // the pipeline to unwind so quitting doesn't orphan ssh/rsync.
         Task { @MainActor in
+            await runner.cancelAndWaitForTransport()
             let deadline = Date.now.addingTimeInterval(5)
             while runner.isRunning, Date.now < deadline {
                 try? await Task.sleep(for: .milliseconds(100))

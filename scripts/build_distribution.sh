@@ -253,10 +253,24 @@ if [[ ! -d "$app_path" ]]; then
     exit 1
 fi
 
-echo "==> Signing app with Developer ID"
+# Sign inside-out (nested helper first, then the bundle). --deep is
+# unsupported for distribution signing and would stamp the app's
+# entitlements onto the helper.
+echo "==> Signing app with Developer ID (inside-out)"
+HELPER_PATH="${app_path}/Contents/MacOS/avifenc"
+HELPER_ENTITLEMENTS_PATH="Sources/WordpressImageUploaderApp/AvifencHelper.entitlements"
+if [[ -f "$HELPER_PATH" ]]; then
+    codesign \
+        --force \
+        --options runtime \
+        --timestamp \
+        --entitlements "$HELPER_ENTITLEMENTS_PATH" \
+        --sign "$DEVELOPER_ID_APP_CERT" \
+        "$HELPER_PATH"
+fi
+
 codesign \
     --force \
-    --deep \
     --options runtime \
     --timestamp \
     --entitlements "$ENTITLEMENTS_PATH" \

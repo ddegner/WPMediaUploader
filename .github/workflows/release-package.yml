@@ -9,9 +9,31 @@ permissions:
   contents: write
   packages: write
 
+concurrency:
+  group: release-package
+  cancel-in-progress: false
+
 jobs:
+  test:
+    runs-on: macos-26
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_26*.app | sort -V | tail -n1)"
+          swift --version
+
+      - name: Run tests
+        shell: bash
+        run: swift test
+
   release-and-package:
-    runs-on: macos-14
+    needs: test
+    runs-on: macos-26
     env:
       GH_TOKEN: ${{ github.token }}
       GITHUB_REPO: ${{ github.repository }}
@@ -26,6 +48,26 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Select Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_26*.app | sort -V | tail -n1)"
+          xcodebuild -version
+
+      # xcodegen is required by build_distribution.sh; oras is required by
+      # the GHCR publish step below; cmake/ninja build the avifenc helper.
+      # All must exist before the build runs.
+      - name: Install build tools
+        shell: bash
+        run: brew install xcodegen oras cmake ninja
+
+      # The vendored encoder is not tracked in git; build it from the pinned
+      # libavif source. Release builds hard-fail without it.
+      - name: Build avifenc helper
+        shell: bash
+        run: ./scripts/build-avifenc.sh
 
       - name: Validate required secrets
         shell: bash
@@ -89,6 +131,11 @@ jobs:
 
       - name: Build, notarize, staple, and publish Release assets
         shell: bash
+        env:
+          # The workflow's own "Publish package to GHCR" step below handles
+          # the package push (the script's docker-login path does not work
+          # on GitHub macOS runners, and pushing twice is wasteful).
+          PUBLISH_GITHUB_PACKAGE: "0"
         run: ./scripts/build_distribution.sh
 
       - name: Capture release metadata
@@ -108,11 +155,6 @@ jobs:
             ${{ steps.metadata.outputs.zip_name }}
             output/release/v${{ steps.metadata.outputs.version }}/sha256.txt
             output/release/v${{ steps.metadata.outputs.version }}/notary.log
-
-      - name: Install ORAS
-        if: ${{ env.PUBLISH_GITHUB_PACKAGE == '1' }}
-        shell: bash
-        run: brew install oras
 
       - name: Publish package to GHCR
         if: ${{ env.PUBLISH_GITHUB_PACKAGE == '1' }}

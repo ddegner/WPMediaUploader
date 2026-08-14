@@ -71,4 +71,32 @@ final class ReportBuilderTests: XCTestCase {
         let text = ReportBuilder.textReport(for: job)
         XCTAssertTrue(text.contains("a.jpg: imported"))
     }
+
+    func testReportsIncludeAvifCountForSideloadedFiles() throws {
+        var file = FileItem(localURL: URL(fileURLWithPath: "/tmp/a.jpg"), filename: "a.jpg", sizeBytes: 10)
+        file.status = .sideloaded
+        file.importAttachmentId = 7
+        file.avifCount = 9
+
+        var job = Job(
+            profileId: UUID(),
+            remoteJobDir: "/tmp/job",
+            files: [file],
+            logsPath: "/tmp/log.txt"
+        )
+        job.step = .finished
+        job.avifSideloadEnabled = true
+
+        let text = ReportBuilder.textReport(for: job)
+        XCTAssertTrue(text.contains("a.jpg: sideloaded"))
+        XCTAssertTrue(text.contains("avifs: 9"))
+
+        let csv = ReportBuilder.csvReport(for: job)
+        XCTAssertTrue(csv.hasPrefix("filename,size_bytes,status,attachment_id,remote_path,error_message,avif_count"))
+        XCTAssertTrue(csv.contains("a.jpg,10,sideloaded,7,,,9"))
+
+        let json = try ReportBuilder.jsonReport(for: job)
+        XCTAssertTrue(json.contains("\"avifCount\" : 9"))
+        XCTAssertTrue(json.contains("\"avifSideloadEnabled\" : true"))
+    }
 }

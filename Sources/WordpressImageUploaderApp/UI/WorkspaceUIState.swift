@@ -28,7 +28,6 @@ enum WorkspaceLayoutState {
     static let showProfilesDrawerKey = "workspace.showProfilesDrawer"
     static let showOperationsDrawerKey = "workspace.showOperationsDrawer"
     static let operationsTabKey = "workspace.operationsTab"
-    static let windowSizeKey = "workspace.windowSize"
 
     static let defaultShowProfilesDrawer = true
     static let defaultShowOperationsDrawer = true
@@ -47,9 +46,32 @@ enum WorkspaceLayoutState {
     }
 
     static func initialOperationsPane(defaults: UserDefaults = .standard) -> WorkspaceOperationsTab? {
-        let show = defaults.object(forKey: showOperationsDrawerKey) as? Bool ?? defaultShowOperationsDrawer
-        guard show else { return nil }
-        return restoredOperationsTab(from: defaults.string(forKey: operationsTabKey) ?? "")
+        guard initialOperationsDrawerVisible(defaults: defaults) else { return nil }
+        return initialOperationsTab(defaults: defaults)
+    }
+
+    // Visibility and selected tab are separate pieces of state: hiding the
+    // inspector must not forget which tab was showing.
+    static func initialOperationsDrawerVisible(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: showOperationsDrawerKey) as? Bool ?? defaultShowOperationsDrawer
+    }
+
+    static func initialOperationsTab(defaults: UserDefaults = .standard) -> WorkspaceOperationsTab {
+        restoredOperationsTab(from: defaults.string(forKey: operationsTabKey) ?? "")
+    }
+
+    // Write-side API: every UserDefaults write for workspace layout goes
+    // through here so the persistence contract lives in one place.
+    static func persistProfilesDrawer(visible: Bool, defaults: UserDefaults = .standard) {
+        defaults.set(visible, forKey: showProfilesDrawerKey)
+    }
+
+    static func persistOperationsDrawer(visible: Bool, defaults: UserDefaults = .standard) {
+        defaults.set(visible, forKey: showOperationsDrawerKey)
+    }
+
+    static func persistOperationsTab(_ tab: WorkspaceOperationsTab, defaults: UserDefaults = .standard) {
+        defaults.set(tab.rawValue, forKey: operationsTabKey)
     }
 
     static func splitVisibility(forProfilesDrawer isVisible: Bool) -> NavigationSplitViewVisibility {

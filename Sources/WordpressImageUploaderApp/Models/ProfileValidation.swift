@@ -11,15 +11,15 @@ enum ProfileValidation {
         password: String?,
         context: ProfileValidationContext
     ) -> String? {
-        if context == .editor, trimmed(profile.name).isEmpty {
+        if context == .editor, profile.name.trimmed.isEmpty {
             return "Profile name is required"
         }
 
-        if trimmed(profile.host).isEmpty {
+        if profile.host.trimmed.isEmpty {
             return "Host is required"
         }
 
-        if trimmed(profile.username).isEmpty {
+        if profile.username.trimmed.isEmpty {
             return "Username is required"
         }
 
@@ -27,16 +27,16 @@ enum ProfileValidation {
             return "Port must be greater than 0"
         }
 
-        if trimmed(profile.wpRootPath).isEmpty {
+        if profile.wpRootPath.trimmed.isEmpty {
             return "WordPress root path is required"
         }
 
-        if trimmed(profile.remoteStagingRoot).isEmpty {
+        if profile.remoteStagingRoot.trimmed.isEmpty {
             return "Remote staging root is required"
         }
 
         if profile.authType == .password {
-            guard let password, !trimmed(password).isEmpty else {
+            guard let password, !password.trimmed.isEmpty else {
                 if context == .execution {
                     return "Password auth selected, but no password is stored in Keychain"
                 }
@@ -46,7 +46,7 @@ enum ProfileValidation {
 
         if profile.authType == .sshKey,
            let keyPath = profile.keyPath,
-           !trimmed(keyPath).isEmpty
+           !keyPath.trimmed.isEmpty
         {
             if let keyBookmarkData = profile.keyBookmarkData {
                 do {
@@ -69,9 +69,5 @@ enum ProfileValidation {
 
     static func canSave(profile: ServerProfile, password: String) -> Bool {
         firstError(for: profile, password: password, context: .editor) == nil
-    }
-
-    private static func trimmed(_ value: String) -> String {
-        value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

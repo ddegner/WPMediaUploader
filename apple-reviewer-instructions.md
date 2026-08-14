@@ -32,6 +32,9 @@ Password: bSdGAF2CQkn8lBTqje
 
 test.jpg should appear at the top of the Media Library.
 
+STEP 5 — NEW IN 1.1 (OPTIONAL): LOCAL AVIF GENERATION
+Edit the profile and enable "Generate AVIFs locally", then upload test.jpg again. After the WordPress import completes, the app encodes AVIF versions of the image and its thumbnail sizes on-device (no server-side encoding) and uploads them into the site's wp-content/uploads directory next to the JPEG files. The job log shows a "Sideloading AVIFs" stage, and the finished job reports how many AVIF files were created. This feature is designed to complement the AVIF Local Support WordPress plugin, but it does not require the plugin to run.
+
 Please don't hesitate to reply if you run into any issues.
 
 Thank you for your time reviewing my app.

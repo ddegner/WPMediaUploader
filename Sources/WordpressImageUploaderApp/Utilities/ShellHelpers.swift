@@ -20,15 +20,20 @@ func shellSingleQuote(_ value: String) -> String {
 
 
 func ensureNoTrailingSlash(_ value: String) -> String {
-    guard value.count > 1 else { return value }
-    if value.hasSuffix("/") {
-        return String(value.dropLast())
+    var result = value
+    while result.count > 1, result.hasSuffix("/") {
+        result = String(result.dropLast())
     }
-    return value
+    return result
 }
 
 func isSupportedImageExtension(_ url: URL) -> Bool {
     supportedImageExtensions.contains(url.pathExtension.lowercased())
+}
+
+// AVIF sideloading is JPEG-only, matching the server plugin's mime gate.
+func isJpegSourceExtension(_ url: URL) -> Bool {
+    ["jpg", "jpeg", "jpe"].contains(url.pathExtension.lowercased())
 }
 
 // Prefix a `wp` command with a PHP finder so WP-CLI uses the correct PHP binary
@@ -41,6 +46,19 @@ private let wpCliPhpFinder = "WP_CLI_PHP=$(command -v php8.4 php8.3 php8.2 php8.
 
 func wpCommand(_ command: String) -> String {
     "export \(wpCliPhpFinder); \(command)"
+}
+
+/// Extracts the outermost {...} span from noisy command output. wp-cli JSON
+/// arrives wrapped in PHP notices/warnings on some hosts (display_errors,
+/// open_basedir); this recovers the object without trusting line structure.
+func extractJSONObject(from rawOutput: String) -> Data? {
+    guard let jsonStart = rawOutput.firstIndex(of: "{"),
+          let jsonEnd = rawOutput.lastIndex(of: "}"),
+          jsonStart < jsonEnd
+    else {
+        return nil
+    }
+    return Data(rawOutput[jsonStart...jsonEnd].utf8)
 }
 
 func parseRsyncProgress(_ line: String) -> Double? {

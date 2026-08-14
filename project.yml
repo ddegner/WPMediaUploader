@@ -15,6 +15,57 @@ targets:
     platform: macOS
     sources:
       - path: Sources/WordpressImageUploaderApp
+    postBuildScripts:
+      # Embed + sign the static AVIF encoder (libavif + aom). Built by
+      # Scripts/build-avifenc.sh; located at runtime via
+      # Bundle.main.url(forAuxiliaryExecutable: "avifenc"). Runs before the
+      # outer app signature, which seals over the helper.
+      - name: Embed and sign avifenc
+        inputFiles:
+          - $(SRCROOT)/Vendor/avifenc/avifenc
+        outputFiles:
+          - $(CODESIGNING_FOLDER_PATH)/Contents/MacOS/avifenc
+        script: |
+          set -euo pipefail
+          HELPER_SRC="$SRCROOT/Vendor/avifenc/avifenc"
+          HELPER_DST="$CODESIGNING_FOLDER_PATH/Contents/MacOS/avifenc"
+          HELPER_ENTITLEMENTS="$SRCROOT/Sources/WordpressImageUploaderApp/AvifencHelper.entitlements"
+          if [ ! -f "$HELPER_SRC" ]; then
+            if [ "${CONFIGURATION:-}" = "Release" ]; then
+              echo "error: Vendor/avifenc/avifenc is missing — a Release build would silently ship without the embedded AVIF encoder. Run scripts/build-avifenc.sh first." >&2
+              exit 1
+            fi
+            echo "warning: Vendor/avifenc/avifenc is missing; this build falls back to ImageIO AVIF encoding." >&2
+            exit 0
+          fi
+          # An 8 MB opaque binary goes into a signed bundle — verify it
+          # against the checksum recorded by scripts/build-avifenc.sh.
+          HELPER_SHA_FILE="$SRCROOT/Vendor/avifenc/avifenc.sha256"
+          if [ -f "$HELPER_SHA_FILE" ]; then
+            (cd "$SRCROOT/Vendor/avifenc" && shasum -a 256 -c avifenc.sha256 >/dev/null) || {
+              echo "error: Vendor/avifenc/avifenc does not match avifenc.sha256 — rebuild with scripts/build-avifenc.sh." >&2
+              exit 1
+            }
+          elif [ "${CONFIGURATION:-}" = "Release" ]; then
+            echo "error: Vendor/avifenc/avifenc.sha256 is missing — run scripts/build-avifenc.sh to record the checksum." >&2
+            exit 1
+          fi
+          mkdir -p "$(dirname "$HELPER_DST")"
+          cp -f "$HELPER_SRC" "$HELPER_DST"
+          chmod +x "$HELPER_DST"
+          if [ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]; then
+            # Notarization requires hardened runtime and a secure timestamp
+            # on nested executables; skip the timestamp only for local
+            # Debug builds so offline development still signs.
+            if [ "${CONFIGURATION:-}" = "Release" ]; then
+              TIMESTAMP_FLAG="--timestamp"
+            else
+              TIMESTAMP_FLAG="--timestamp=none"
+            fi
+            codesign --force --options runtime "$TIMESTAMP_FLAG" \
+              --entitlements "$HELPER_ENTITLEMENTS" \
+              --sign "$EXPANDED_CODE_SIGN_IDENTITY" "$HELPER_DST"
+          fi
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.degner.WordpressMediaUploader
@@ -28,14 +79,15 @@ targets:
         PRODUCT_NAME: WP Media Uploader
         PRODUCT_MODULE_NAME: WordpressMediaUploaderApp
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        CURRENT_PROJECT_VERSION: 7
-        MARKETING_VERSION: "1.0.1"
+        CURRENT_PROJECT_VERSION: 8
+        MARKETING_VERSION: "1.1"
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: Q26G342EEL
+        # All sandbox/network/file entitlements live in the .entitlements file
+        # so Xcode-signed (App Store) and manually-signed (Developer ID) builds
+        # carry an identical security posture. Do not reintroduce ENABLE_*
+        # settings here — those only apply when Xcode itself signs.
         CODE_SIGN_ENTITLEMENTS: Sources/WordpressImageUploaderApp/WPMediaUploader.entitlements
-        ENABLE_APP_SANDBOX: YES
-        ENABLE_OUTGOING_NETWORK_CONNECTIONS: YES
-        ENABLE_USER_SELECTED_FILES: readonly
   WordpressMediaUploaderAppTests:
     type: bundle.unit-test
     platform: macOS
